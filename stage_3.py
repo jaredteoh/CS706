@@ -22,12 +22,6 @@ This directly targets AutoEmpirical's ~50% root cause accuracy by:
 Taxonomy source: Quan et al. ASE 2022
   Symptoms   : 5 primary, 15 subcategories, 15 leaf types
   Root causes : 5 primary, 17 subcategories
-
-Run standalone:
-    python stage3_fault_taxonomy.py
-
-Or via orchestrator:
-    python main.py
 """
 
 import json

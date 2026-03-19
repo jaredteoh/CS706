@@ -11,12 +11,6 @@ Three CAMEL ChatAgents:
                               issue text + code context
   3. ConfidenceScorerAgent  - reviews FilterAgent's reasoning, assigns
                               adjusted confidence, flags low-confidence cases
-
-Run standalone:
-    python stage2_issue_filtering.py
-
-Or via orchestrator:
-    python main.py
 """
 
 import json

@@ -118,8 +118,8 @@ class Stage3Config:
     max_rounds: int = 3           # safety cap on debate rounds
     confidence_threshold: float = 0.80  # resolver stops debating above this
 
-    # Cap for testing — set to None for full run
-    max_issues: Optional[int] = 10
+    # Cap for testing — None means process all
+    max_issues: Optional[int] = None
 
     # LLM backend
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -562,7 +562,7 @@ if __name__ == "__main__":
         ]
 
     config = Stage3Config(
-        max_issues=5,                # set to None for full run
+        max_issues=None,             # set to an int to cap for testing
         max_rounds=3,
         confidence_threshold=0.80,
         model=ModelConfig(

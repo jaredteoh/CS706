@@ -68,8 +68,8 @@ class Stage2Config:
     github_api_base: str = "https://api.github.com"
     github_rate_limit_delay: float = 0.5
 
-    # Cap for testing — set to None to process all issues
-    max_issues: Optional[int] = 20
+    # Max issues to process per repo — set to None to process all
+    max_issues_per_repo: Optional[int] = 20
 
     # LLM backend (shared config from shared/models.py)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -409,13 +409,20 @@ class Stage2Pipeline:
 
         all_issues = []
         for repo_entry in repos:
-            repo_full = repo_entry.get("name", "")  # e.g. "tensorflow/tfjs"
+            # Extract owner/repo from the GitHub URL (more reliable than name)
+            url = repo_entry.get("url", "")
+            if "github.com/" not in url:
+                print(f"           Skipping '{repo_entry.get('name')}' — no valid GitHub URL")
+                continue
+            repo_full = url.split("github.com/")[-1].rstrip("/")
             if "/" not in repo_full:
-                print(f"           Skipping '{repo_full}' — not in owner/repo format")
+                print(f"           Skipping '{repo_full}' — could not parse owner/repo from URL")
                 continue
             owner, repo_name = repo_full.split("/", 1)
             try:
                 raw = self.retriever.github.list_issues(owner, repo_name)
+                if self.config.max_issues_per_repo:
+                    raw = raw[:self.config.max_issues_per_repo]
                 for issue in raw:
                     all_issues.append({
                         "repo": repo_full,
@@ -424,7 +431,7 @@ class Stage2Pipeline:
                         "body": (issue.get("body") or "")[:500],
                         "labels": [l["name"] for l in issue.get("labels", [])],
                     })
-                print(f"           {repo_full}: {len(raw)} issues fetched")
+                print(f"           {repo_full} ({repo_entry.get('name')}): {len(raw)} issues fetched")
                 time.sleep(self.config.github_rate_limit_delay)
             except Exception as e:
                 print(f"           {repo_full}: fetch failed — {e}")
@@ -433,9 +440,6 @@ class Stage2Pipeline:
         return all_issues
 
     def run(self, issues: list) -> dict:
-        if self.config.max_issues:
-            issues = issues[:self.config.max_issues]
-
         fault_related, non_fault, flagged = [], [], []
         fetch_failures = 0
         total = len(issues)
@@ -534,7 +538,7 @@ class Stage2Pipeline:
 
 if __name__ == "__main__":
     config = Stage2Config(
-        max_issues=20,  # cap per run — set to None for full run
+        max_issues_per_repo=20,  # cap per repo — set to None for full run
         model=ModelConfig(
             platform=ModelPlatformType.OLLAMA,
             model_type="llama3",

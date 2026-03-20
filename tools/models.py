@@ -1,20 +1,28 @@
-"""
-shared/models.py
-================
-Single source of truth for:
-  - ModelConfig  : LLM backend settings shared across all stages
-  - build_model(): returns a CAMEL ModelFactory instance
-  - parse_json() : robust JSON extraction from LLM responses
-
-All three stages import from here — never duplicate model setup code.
-"""
-
 import json
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from camel.models import ModelFactory
 from camel.types import ModelPlatformType
+
+
+# ---------------------------------------------------------------------------
+# Model registry
+# ---------------------------------------------------------------------------
+
+MODEL_REGISTRY: dict[str, tuple[ModelPlatformType, str, int]] = {
+    # Ollama (local)
+    "llama3":                (ModelPlatformType.OLLAMA,     "llama3",                        4096),
+    # OpenAI
+    "gpt-4o":                (ModelPlatformType.OPENAI,     "gpt-4o",                        4096),
+    "o3":                    (ModelPlatformType.OPENAI,     "o3",                            4096),
+    # Anthropic
+    "claude-3-7-sonnet":     (ModelPlatformType.ANTHROPIC,  "claude-3-7-sonnet-20250219",    4096),
+    # Google
+    "gemini-2.5-flash":      (ModelPlatformType.GEMINI,     "gemini-2.5-flash-preview-04-17", 4096),
+    # DeepSeek
+    "deepseek-v3":           (ModelPlatformType.DEEPSEEK,   "deepseek-chat",                 4096),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -25,22 +33,30 @@ from camel.types import ModelPlatformType
 class ModelConfig:
     """
     LLM backend settings shared across Stage I, II, and III.
-
-    Ollama (local):
-        platform   = ModelPlatformType.OLLAMA
-        model_type = "llama3"
-        url        = "http://localhost:11434/v1"
-
-    OpenAI (cloud):
-        platform   = ModelPlatformType.OPENAI
-        model_type = "gpt-4o"
-        url        = None  (ignored)
+    Build from a friendly name via model_config_from_name(), or manually.
     """
     platform: ModelPlatformType = ModelPlatformType.OLLAMA
     model_type: str = "llama3"
-    url: str = "http://localhost:11434/v1"
+    url: str = "http://localhost:11434/v1"   # only used for Ollama
     temperature: float = 0.2
     token_limit: int = 4096
+
+
+def model_config_from_name(name: str, temperature: float = 0.2) -> ModelConfig:
+    """
+    Build a ModelConfig from a friendly model name (e.g. 'gpt-4o').
+    Raises ValueError for unknown names.
+    """
+    if name not in MODEL_REGISTRY:
+        known = ", ".join(MODEL_REGISTRY)
+        raise ValueError(f"Unknown model '{name}'. Known models: {known}")
+    platform, api_id, token_limit = MODEL_REGISTRY[name]
+    return ModelConfig(
+        platform=platform,
+        model_type=api_id,
+        temperature=temperature,
+        token_limit=token_limit,
+    )
 
 
 def build_model(config: ModelConfig):

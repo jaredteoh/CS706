@@ -16,8 +16,12 @@ import sys
 from dataclasses import dataclass
 from typing import Optional
 
+import httpx
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from tools.models import ModelConfig, build_model, parse_json
@@ -47,11 +51,16 @@ class Stage1Config:
 
     output_path: str = "outputs/stage1_output.json"
 
+    # GitHub token for repo validation (reads GITHUB_TOKEN env var by default)
+    github_token: Optional[str] = None
+
     model: ModelConfig = None
 
     def __post_init__(self):
         if self.model is None:
             self.model = ModelConfig()
+        if self.github_token is None:
+            self.github_token = os.getenv("GITHUB_TOKEN")
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +183,80 @@ class Stage1Pipeline:
         return repos, raw
 
     # ------------------------------------------------------------------
+    # Step 1b: Validate repos against GitHub API, re-prompt for failures
+    # ------------------------------------------------------------------
+
+    def _validate_repos(self, repos: list[dict]) -> list[dict]:
+        """Drop repos that don't exist on GitHub, re-prompt for replacements."""
+        headers = {"Accept": "application/vnd.github+json",
+                   "X-GitHub-Api-Version": "2022-11-28"}
+        if self.config.github_token:
+            headers["Authorization"] = f"Bearer {self.config.github_token}"
+
+        valid, invalid = [], []
+        with httpx.Client(base_url="https://api.github.com",
+                          headers=headers, timeout=10.0) as client:
+            for repo in repos:
+                url = repo.get("url", "")
+                if "github.com/" not in url:
+                    print(f"          ✗ {repo.get('name')} — no GitHub URL, skipping")
+                    invalid.append(repo)
+                    continue
+                owner_repo = url.split("github.com/")[-1].rstrip("/")
+                try:
+                    r = client.get(f"/repos/{owner_repo}")
+                    if r.status_code == 200:
+                        print(f"          ✓ {owner_repo}")
+                        valid.append(repo)
+                    else:
+                        print(f"          ✗ {owner_repo} — HTTP {r.status_code}, dropping")
+                        invalid.append(repo)
+                except Exception as e:
+                    print(f"          ✗ {repo.get('name')} — {e}, dropping")
+                    invalid.append(repo)
+
+        # Re-prompt for replacements if any were dropped
+        if invalid and len(valid) < self.config.num_repos:
+            needed = self.config.num_repos - len(valid)
+            invalid_names = [r.get("name", r.get("url", "?")) for r in invalid]
+            print(f"          Re-prompting for {needed} replacement(s)...")
+            prompt = (
+                f"Research theme: {self.config.research_theme}\n\n"
+                f"Scope constraints: {self.config.scope_constraints}\n\n"
+                f"The following repositories were rejected because they do not "
+                f"exist on GitHub: {', '.join(invalid_names)}.\n\n"
+                f"Already confirmed valid:\n"
+                + "\n".join(f"- {r.get('name')} ({r.get('url')})" for r in valid)
+                + f"\n\nPlease suggest {needed} additional real, verifiable GitHub "
+                f"repositories to replace the rejected ones. "
+                f"Return JSON only."
+            )
+            response = self.repo_selector.step(
+                BaseMessage.make_user_message(role_name="Researcher", content=prompt)
+            )
+            replacements = parse_json(response.msg.content,
+                                      field="repositories", default=[])
+            # Validate replacements too (one pass, no further recursion)
+            with httpx.Client(base_url="https://api.github.com",
+                              headers=headers, timeout=10.0) as client:
+                for repo in replacements:
+                    url = repo.get("url", "")
+                    if "github.com/" not in url:
+                        continue
+                    owner_repo = url.split("github.com/")[-1].rstrip("/")
+                    try:
+                        r = client.get(f"/repos/{owner_repo}")
+                        if r.status_code == 200:
+                            print(f"          ✓ {owner_repo} (replacement)")
+                            valid.append(repo)
+                        else:
+                            print(f"          ✗ {owner_repo} — still invalid, skipping")
+                    except Exception:
+                        pass
+
+        return valid[:self.config.num_repos]
+
+    # ------------------------------------------------------------------
     # Step 2: Research question formulation
     # ------------------------------------------------------------------
 
@@ -205,13 +288,17 @@ class Stage1Pipeline:
     def run(self) -> Stage1Output:
         print(f"[Stage I] Research theme: {self.config.research_theme}")
  
-        print("[Stage I] Step 1/2 — Selecting repositories...")
+        print("[Stage I] Step 1/3 — Selecting repositories...")
         repos, raw_repos = self._select_repos()
         print(f"          Selected {len(repos)} repositories.")
+
+        print("[Stage I] Step 2/3 — Validating repositories against GitHub...")
+        repos = self._validate_repos(repos)
+        print(f"          {len(repos)} valid repositories confirmed.")
         for r in repos:
             print(f"          • {r.get('name', '?')} — {r.get('rationale', '')[:80]}...")
- 
-        print("[Stage I] Step 2/2 — Formulating research questions...")
+
+        print("[Stage I] Step 3/3 — Formulating research questions...")
         rqs, raw_rqs = self._formulate_rqs(repos)
         print(f"          Formulated {len(rqs)} research questions.")
         for i, rq in enumerate(rqs, 1):

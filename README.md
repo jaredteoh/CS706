@@ -17,7 +17,7 @@ A **Coordinator Agent** oversees each stage and decides whether the output is su
 ## Installation
 
 ```bash
-pip install camel-ai[all]
+pip install camel-ai
 ```
 
 ## Ollama Setup (for local models)

@@ -46,7 +46,7 @@ You only need the API key for the model you intend to use. `GITHUB_TOKEN` is alw
 | `GITHUB_TOKEN` | All runs (fetching GitHub issues) |
 | `OPENAI_API_KEY` | `--model gpt-4o` or `--model o3` |
 | `ANTHROPIC_API_KEY` | `--model claude-3-7-sonnet` |
-| `GOOGLE_API_KEY` | `--model gemini-2.5-flash` |
+| `GEMINI_API_KEY` | `--model gemini-2.5-flash` |
 | `DEEPSEEK_API_KEY` | `--model deepseek-v3` |
 
 ## Usage

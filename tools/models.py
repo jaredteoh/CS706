@@ -14,12 +14,12 @@ MODEL_REGISTRY: dict[str, tuple[ModelPlatformType, str, int]] = {
     # Ollama (local)
     "llama3":                (ModelPlatformType.OLLAMA,     "llama3",                        4096),
     # OpenAI
-    "gpt-4o":                (ModelPlatformType.OPENAI,     "gpt-4o",                        4096),
-    "o3":                    (ModelPlatformType.OPENAI,     "o3",                            4096),
+    "gpt-4o":                (ModelPlatformType.OPENAI,     "gpt-4o",                        32768),
+    "o3":                    (ModelPlatformType.OPENAI,     "o3",                            32768),
     # Anthropic
-    "claude-3-7-sonnet":     (ModelPlatformType.ANTHROPIC,  "claude-3-7-sonnet-20250219",    4096),
+    "claude-3-7-sonnet":     (ModelPlatformType.ANTHROPIC,  "claude-3-7-sonnet-20250219",    32768),
     # Google
-    "gemini-2.5-flash":      (ModelPlatformType.GEMINI,     "gemini-2.5-flash-preview-04-17", 4096),
+    "gemini-2.5-flash":      (ModelPlatformType.GEMINI,     "models/gemini-2.5-flash",       32768),
     # DeepSeek
     "deepseek-v3":           (ModelPlatformType.DEEPSEEK,   "deepseek-chat",                 4096),
 }

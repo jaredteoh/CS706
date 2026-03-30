@@ -13,6 +13,7 @@ Three CAMEL ChatAgents:
                               adjusted confidence, flags low-confidence cases
 """
 
+import csv
 import json
 import os
 import sys
@@ -23,7 +24,6 @@ from typing import Optional
 import httpx
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
-from camel.types import ModelPlatformType
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -71,6 +71,9 @@ class Stage2Config:
     # Max issues to process per repo — set to None to process all
     max_issues_per_repo: Optional[int] = 20
 
+    # Path to a pre-collected CSV (skips Stage 1 + GitHub issue fetching)
+    csv_path: Optional[str] = None
+
     # LLM backend (shared config from shared/models.py)
     model: ModelConfig = field(default_factory=ModelConfig)
 
@@ -87,6 +90,8 @@ class IssueContext:
     body: str
     labels: list
     created_at: str
+    state: Optional[str] = None
+    comments_content: Optional[str] = None
     linked_pr: Optional[dict] = None
     diff_summary: Optional[str] = None
     changed_files: Optional[list] = None
@@ -298,10 +303,13 @@ class FilterAgent:
         parts = [
             f"Repository: {ctx.repo}",
             f"Issue #{ctx.issue_number}: {ctx.title}",
+            f"State: {ctx.state or 'unknown'}",
             f"Created: {ctx.created_at}",
             f"Labels: {', '.join(ctx.labels) if ctx.labels else 'none'}",
             "", "Issue body:", ctx.body or "(empty)",
         ]
+        if ctx.comments_content:
+            parts += ["", "Comments:", ctx.comments_content]
         if ctx.diff_summary:
             parts += ["", "Linked PR diff (first 2000 chars):",
                       ctx.diff_summary]
@@ -322,22 +330,27 @@ class FilterAgent:
 
 class ConfidenceScorerAgent:
     """
-    CAMEL ChatAgent that reviews FilterAgent's decision.
+    CAMEL ChatAgent that reviews and can override FilterAgent's decision.
 
-    Checks reasoning for logical gaps, adjusts confidence, and flags
-    borderline cases for human review.
-    Returns JSON: {adjusted_confidence, review_notes, flag_for_human_review}
+    Challenges the FilterAgent's reasoning. If the evidence clearly
+    contradicts the classification, it overrides the decision outright.
+    Returns JSON: {adjusted_confidence, override_decision, review_notes,
+                   flag_for_human_review}
     """
 
     SYSTEM_PROMPT = (
         "You are a senior software engineering researcher reviewing a "
-        "fault classification decision.\n\n"
-        "Check whether the reasoning is sound and consistent with the "
-        "evidence. Identify contradictions, missing evidence, or borderline "
-        "cases. Output an adjusted confidence score.\n\n"
+        "fault classification decision made by a junior researcher.\n\n"
+        "Your job is to challenge the decision:\n"
+        "- If the reasoning contains clear errors or ignores key evidence "
+        "(e.g. comments show the issue was closed as a feature request, "
+        "duplicate, or expected behaviour — but it was classified as fault), "
+        "set override_decision to the correct value.\n"
+        "- If the reasoning is sound, set override_decision to null.\n"
+        "- Adjust the confidence to reflect the actual strength of evidence.\n\n"
         "Respond with valid JSON only — no prose, no markdown fences.\n"
-        'Schema: {"adjusted_confidence": float, "review_notes": str, '
-        '"flag_for_human_review": bool}\n'
+        'Schema: {"adjusted_confidence": float, "override_decision": bool | null, '
+        '"review_notes": str, "flag_for_human_review": bool}\n'
         "adjusted_confidence is a float between 0.0 and 1.0."
     )
 
@@ -355,21 +368,28 @@ class ConfidenceScorerAgent:
     def review(self, ctx: IssueContext, filter_result: dict) -> dict:
         verdict = "FAULT-RELATED" if filter_result.get(
             "is_fault_related") else "NOT FAULT-RELATED"
-        context_note = (
-            "Issue text + PR diff + changed files"
-            if ctx.diff_summary else "Issue text only"
-        )
-        prompt = (
-            f"Issue: {ctx.repo}#{ctx.issue_number} — {ctx.title}\n\n"
-            f"Classification: {verdict}\n"
-            f"Reasoning: {filter_result.get('reasoning', '')}\n"
-            f"Initial confidence: {filter_result.get('confidence', 0.0)}\n"
-            f"Context available: {context_note}\n"
-            f"Fetch errors: {ctx.fetch_error or 'none'}\n\n"
-            f"Review this decision. Flag for human review if "
-            f"adjusted_confidence < {self.config.confidence_threshold}. "
-            f"Respond with JSON only."
-        )
+        parts = [
+            f"Issue: {ctx.repo}#{ctx.issue_number} — {ctx.title}",
+            f"State: {ctx.state or 'unknown'}",
+            "",
+            f"Classification: {verdict}",
+            f"Reasoning: {filter_result.get('reasoning', '')}",
+            f"Initial confidence: {filter_result.get('confidence', 0.0)}",
+        ]
+        if ctx.comments_content:
+            parts += ["", "Comments (check for resolution signals):",
+                      ctx.comments_content]
+        if ctx.diff_summary:
+            parts += ["", "Linked PR diff:", ctx.diff_summary]
+        parts += [
+            "",
+            f"Challenge this decision. If the evidence clearly contradicts "
+            f"the classification, set override_decision to the correct bool. "
+            f"Otherwise set override_decision to null. "
+            f"Flag for human review if adjusted_confidence < "
+            f"{self.config.confidence_threshold}. Respond with JSON only.",
+        ]
+        prompt = "\n".join(parts)
         response = self.agent.step(
             BaseMessage.make_user_message(
                 role_name="Researcher", content=prompt)
@@ -378,6 +398,7 @@ class ConfidenceScorerAgent:
         return parse_json(response.msg.content,
                           default={"adjusted_confidence": filter_result.get(
                               "confidence", 0.5),
+                              "override_decision": None,
                               "review_notes": "parse failed",
                               "flag_for_human_review": True})
 
@@ -398,6 +419,49 @@ class Stage2Pipeline:
         self.retriever = ContextRetrieverAgent(self.config)
         self.filter_agent = FilterAgent(self.config, model)
         self.scorer = ConfidenceScorerAgent(self.config, model)
+
+    def load_issues_from_csv(self, csv_path: str) -> list:
+        """Load pre-collected issues from a CSV file, bypassing Stage 1.
+
+        Expected columns: issue (GitHub URL), title, body, label, state,
+        created_at.  The issue URL encodes both repo and issue number,
+        e.g. https://github.com/tensorflow/tfjs/issues/2818.
+        """
+        issues = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                url = row.get("issue", "").strip()
+                # Parse owner/repo and issue number from URL
+                if "github.com/" not in url:
+                    print(f"[Stage II] Skipping row — no GitHub URL: {url}")
+                    continue
+                try:
+                    path = url.split("github.com/")[-1].rstrip("/")
+                    parts = path.split("/")
+                    # Expected: owner / repo / issues / number
+                    owner, repo_name, _, num_str = parts[0], parts[1], parts[2], parts[3]
+                    issue_number = int(num_str)
+                except (IndexError, ValueError):
+                    print(f"[Stage II] Skipping row — could not parse URL: {url}")
+                    continue
+
+                issues.append({
+                    "repo": f"{owner}/{repo_name}",
+                    "issue_number": issue_number,
+                    "title": row.get("title", ""),
+                    "body": row.get("body") or "",
+                    "state": row.get("state", ""),
+                    "created_at": row.get("created_at", ""),
+                    "comments_content": row.get("comments_content", ""),
+                    "labels": [],
+                    "ground_truth_label": row.get("label", ""),
+                })
+
+        if self.config.max_issues_per_repo:
+            issues = issues[:self.config.max_issues_per_repo]
+        print(f"[Stage II] Loaded {len(issues)} issues from {csv_path}")
+        return issues
 
     def fetch_issues_from_stage1(self) -> list:
         """Read Stage I output and fetch candidate issues for each repo."""
@@ -450,26 +514,45 @@ class Stage2Pipeline:
             print(f"[Stage II] {i+1}/{total} — {issue['repo']}#{num}")
 
             # Agent 1: retrieve context
-            ctx = self.retriever.retrieve(owner, repo_name, num)
-            if ctx.fetch_error and not ctx.title:
-                ctx.title = issue.get("title", "")
-                ctx.body = issue.get("body", "")
-                ctx.labels = issue.get("labels", [])
-                fetch_failures += 1
-                print(f"           fetch failed: {ctx.fetch_error}")
-            elif ctx.linked_pr:
-                print(f"           PR #{ctx.linked_pr['number']} retrieved")
+            if "comments_content" in issue:
+                # CSV path — all content already available, skip GitHub entirely
+                ctx = IssueContext(
+                    issue_number=num,
+                    repo=issue["repo"],
+                    title=issue.get("title", ""),
+                    body=issue.get("body", ""),
+                    state=issue.get("state", ""),
+                    created_at=issue.get("created_at", ""),
+                    comments_content=issue.get("comments_content", ""),
+                    labels=issue.get("labels", []),
+                )
+                print(f"           loaded from CSV — text-only")
             else:
-                print(f"           no linked PR — text-only")
+                ctx = self.retriever.retrieve(owner, repo_name, num)
+                if ctx.fetch_error and not ctx.title:
+                    ctx.title = issue.get("title", "")
+                    ctx.body = issue.get("body", "")
+                    ctx.labels = issue.get("labels", [])
+                    fetch_failures += 1
+                    print(f"           fetch failed: {ctx.fetch_error}")
+                elif ctx.linked_pr:
+                    print(f"           PR #{ctx.linked_pr['number']} retrieved")
+                else:
+                    print(f"           no linked PR — text-only")
 
             # Agent 2: filter
             filter_result = self.filter_agent.classify(ctx)
             is_fault = filter_result.get("is_fault_related", False)
 
-            # Agent 3: confidence scoring
+            # Agent 3: confidence scoring + optional override
             review = self.scorer.review(ctx, filter_result)
             confidence = float(review.get("adjusted_confidence",
                                           filter_result.get("confidence", 0.5)))
+            override = review.get("override_decision")
+            if override is not None and isinstance(override, bool):
+                is_fault = override
+                print(f"           [Scorer overrode decision → "
+                      f"{'FAULT' if is_fault else 'non-fault'}]")
             flag = review.get("flag_for_human_review", False) or (
                 confidence < self.config.confidence_threshold)
 
@@ -537,17 +620,30 @@ class Stage2Pipeline:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AutoEmpirical MAS — Stage II standalone")
+    parser.add_argument("--csv-path", default=None,
+                        help="Path to pre-collected issues CSV (skips Stage 1)")
+    parser.add_argument("--model", default="llama3",
+                        help="Model name (default: llama3)")
+    parser.add_argument("--max-issues-per-repo", type=int, default=None,
+                        help="Cap number of issues to process (default: no cap)")
+    args = parser.parse_args()
+
+    from tools.models import model_config_from_name
     config = Stage2Config(
-        max_issues_per_repo=20,  # cap per repo — set to None for full run
-        model=ModelConfig(
-            platform=ModelPlatformType.OLLAMA,
-            model_type="llama3",
-        ),
+        max_issues_per_repo=args.max_issues_per_repo,
+        csv_path=args.csv_path,
+        model=model_config_from_name(args.model),
     )
 
     pipeline = Stage2Pipeline(config)
     try:
-        issues = pipeline.fetch_issues_from_stage1()
+        if args.csv_path:
+            issues = pipeline.load_issues_from_csv(args.csv_path)
+        else:
+            issues = pipeline.fetch_issues_from_stage1()
         pipeline.run(issues)
     finally:
         pipeline.close()

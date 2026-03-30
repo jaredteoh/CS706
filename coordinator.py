@@ -66,10 +66,11 @@ class CoordinatorAgent:
 class AutoEmpiricalMAS:
 
     def __init__(self, research_theme: str, model_config: ModelConfig,
-                 max_issues_per_repo: int = None):
+                 max_issues_per_repo: int = None, csv_path: str = None):
         self.research_theme = research_theme
         self.model_config = model_config
         self.max_issues_per_repo = max_issues_per_repo
+        self.csv_path = csv_path
         self.coordinator = CoordinatorAgent(model_config)
 
     # ------------------------------------------
@@ -113,11 +114,15 @@ class AutoEmpiricalMAS:
     def run_stage2(self):
         config = Stage2Config(
             max_issues_per_repo=self.max_issues_per_repo,
+            csv_path=self.csv_path,
             model=self.model_config,
         )
         pipeline = Stage2Pipeline(config)
 
-        issues = pipeline.fetch_issues_from_stage1()
+        if self.csv_path:
+            issues = pipeline.load_issues_from_csv(self.csv_path)
+        else:
+            issues = pipeline.fetch_issues_from_stage1()
         output = pipeline.run(issues)
 
         decision = self.coordinator.decide(
@@ -179,8 +184,11 @@ class AutoEmpiricalMAS:
     def run(self):
         print("\n===== AUTOEMPIRICAL MAS START =====\n", flush=True)
 
-        print("[Coordinator] Running Stage 1...", flush=True)
-        self.run_stage1()
+        if self.csv_path:
+            print(f"[Coordinator] Skipping Stage 1 — loading issues from CSV: {self.csv_path}", flush=True)
+        else:
+            print("[Coordinator] Running Stage 1...", flush=True)
+            self.run_stage1()
 
         print("[Coordinator] Running Stage 2...", flush=True)
         self.run_stage2()
@@ -211,6 +219,10 @@ if __name__ == "__main__":
         "--max-issues-per-repo", type=int, default=None,
         help="Max issues to fetch per repo in Stage 2 (default: no cap)"
     )
+    parser.add_argument(
+        "--csv-path", default=None,
+        help="Path to pre-collected issues CSV — skips Stage 1 entirely"
+    )
     args = parser.parse_args()
 
     model_config = model_config_from_name(args.model)
@@ -219,5 +231,6 @@ if __name__ == "__main__":
         research_theme=args.research_theme,
         model_config=model_config,
         max_issues_per_repo=args.max_issues_per_repo,
+        csv_path=args.csv_path,
     )
     system.run()

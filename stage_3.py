@@ -18,6 +18,8 @@ This directly targets AutoEmpirical's ~50% root cause accuracy by:
   - Forcing the classifier to justify its reasoning under scrutiny
   - Having a separate resolver that is not anchored to the first label
   - Using the full debate transcript as context for the final decision
+  - SPLIT DEBATE: symptom and root cause debated separately so that
+    root cause reasoning is grounded in the already-settled symptom
 
 Taxonomy source: Quan et al. ASE 2022
   Symptoms   : 5 primary, 15 subcategories, 15 leaf types
@@ -125,6 +127,51 @@ Root Cause Taxonomy (AutoEmpirical — Quan et al. 2022):
 Output the subcategory ID (e.g. A.4, B.2, D.2). Use E only when the root cause truly cannot be determined.
 """
 
+# Lookup table so Phase 2 agents receive the symptom description,
+# not just the bare ID (e.g. "A.1.1 — DL Operator Exception")
+SYMPTOM_LABELS = {
+    "A":     "Crash",
+    "A.1":   "Reference Error",
+    "A.1.1": "DL Operator Exception",
+    "A.1.2": "Function Inaccessible",
+    "A.1.3": "Tensor Disposed",
+    "A.1.4": "Attribute/Return Value Undefined",
+    "A.1.5": "Training Argument Exception",
+    "A.2":   "Data & Model Error",
+    "A.2.1": "Tensor Shape/Type/Value Error",
+    "A.2.2": "JS Variable Shape/Type/Value Error",
+    "A.2.3": "Model Usage/Design Error",
+    "A.3":   "Fetch Failure",
+    "A.4":   "Browser & Device Error",
+    "B":     "Poor Performance",
+    "B.1":   "Time",
+    "B.1.1": "Slow Execution",
+    "B.1.2": "Browser Hangs",
+    "B.2":   "Memory",
+    "B.2.1": "Memory Leak",
+    "B.2.2": "Out of Memory",
+    "B.2.3": "Abnormal GPU Memory/Utilization",
+    "B.3":   "Others",
+    "B.3.1": "Regression",
+    "B.3.2": "Unstable",
+    "C":     "Build & Initialization Failure",
+    "C.1":   "TF.js/JS Application Compile Failure",
+    "C.2":   "npm Package Installation Failure",
+    "C.3":   "Multi-backend Initialization Failure",
+    "D":     "Incorrect Functionality",
+    "D.1":   "Inconsistency between Backends/Platforms/Devices",
+    "D.2":   "Poor Accuracy",
+    "D.3":   "Inf/None/Null Results",
+    "D.4":   "Others",
+    "E":     "Document Error",
+}
+
+
+def _symptom_context(symptom_id: str) -> str:
+    """Returns 'A.1.1 - DL Operator Exception' for use in Phase 2 prompts."""
+    label = SYMPTOM_LABELS.get(symptom_id, "")
+    return f"{symptom_id} - {label}" if label else symptom_id
+
 
 # ---------------------------------------------------------------------------
 # Stage III configuration
@@ -137,8 +184,8 @@ class Stage3Config:
     output_path: str = "outputs/stage3_output.json"
 
     # Debate settings
-    max_rounds: int = 3           # safety cap on debate rounds
-    confidence_threshold: float = 0.80  # resolver stops debating above this
+    max_rounds: int = 3
+    confidence_threshold: float = 0.80
 
     # Cap for testing — None means process all
     max_issues: Optional[int] = None
@@ -157,7 +204,7 @@ class Stage3Config:
 @dataclass
 class DebateRound:
     round_number: int
-    classifier_label: dict      # {symptom_id, root_cause_id, reasoning}
+    classifier_label: dict
     critic_challenge: str
     classifier_rebuttal: str
 
@@ -166,26 +213,22 @@ class DebateRound:
 class TaxonomyDecision:
     issue_number: int
     repo: str
-    symptom_id: str             # symptom taxonomy ID (e.g. A.1, B.2.1, C)
-    root_cause_id: str          # root cause taxonomy ID (e.g. A.4, B.2)
+    symptom_id: str
+    root_cause_id: str
     reasoning: str
     confidence: float
     debate_rounds: int
-    debate_transcript: list     # list of DebateRound dicts
+    debate_transcript: dict     # {"symptom": [...], "root_cause": [...]}
     ground_truth_symptom: str = ""
     ground_truth_root_cause: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Agent 1: ClassifierAgent
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 def _format_issue_context(issue: dict) -> str:
-    """Build the issue context block passed to every Stage 3 agent prompt.
-
-    Uses full issue content (title, body, comments) when available.
-    Falls back to Stage 2 reasoning when running after Stage 2 without CSV.
-    """
+    """Build the issue context block passed to every Stage 3 agent prompt."""
     parts = []
     if issue.get("title"):
         parts.append(f"Title: {issue['title']}")
@@ -196,36 +239,45 @@ def _format_issue_context(issue: dict) -> str:
     if issue.get("comments_content"):
         parts.append(f"\nComments:\n{issue['comments_content']}")
     if issue.get("reasoning") and not issue.get("body"):
-        # Fallback: use Stage 2 reasoning when no raw content is available
         parts.append(f"\nStage 2 analysis:\n{issue['reasoning']}")
     return "\n".join(parts) if parts else "(no issue content available)"
 
 
-class ClassifierAgent:
+def _format_transcript(transcript: list) -> str:
+    lines = []
+    for turn in transcript:
+        r = turn["round"]
+        lines += [
+            f"--- Round {r} ---",
+            f"Classifier: {turn.get('label_id', '')}",
+            f"  Reasoning: {turn.get('classifier_reasoning', '')}",
+            f"Critic: {turn.get('challenge', '')}",
+            f"Classifier rebuttal: {turn.get('rebuttal', '')}",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Agent 1a: SymptomClassifierAgent
+# ---------------------------------------------------------------------------
+
+class SymptomClassifierAgent:
     """
-    CAMEL ChatAgent that proposes symptom + root cause labels.
-
-    On first call: classifies from scratch given issue text.
-    On subsequent calls: rebuts the critic's challenge, potentially
-    revising or defending the original label.
-
-    Returns JSON: {symptom_id, root_cause_id, reasoning, confidence}
+    Classifies ONLY the symptom.
+    Unchanged from original ClassifierAgent except scope is symptom-only.
+    Returns JSON: {symptom_id, reasoning, confidence}
     """
 
     SYSTEM_PROMPT = (
         "You are an expert in analyzing JavaScript-based deep learning systems bugs.\n\n"
-        "Given a GitHub issue, classify it into:\n"
-        "  1. symptom_id  — the bug symptom ID from the taxonomy (e.g. A.1, B.2.1, C, D)\n"
-        "  2. root_cause_id — the root cause ID from the taxonomy (e.g. A.4, B.2, D.2)\n\n"
+        "Given a GitHub issue, classify ONLY the bug symptom ID from the taxonomy.\n\n"
         "Rules:\n"
         "- Use ONLY the provided taxonomy IDs — do not invent new ones.\n"
         "- Choose the most specific ID that fits the evidence.\n"
-        "- Use top-level IDs (C, D, E) only when no subcategory clearly applies.\n"
-        "- For root cause, always use a subcategory ID (e.g. A.4 not just A); use E only "
-        "when the root cause truly cannot be determined.\n\n"
+        "- Use top-level IDs (C, D, E) only when no subcategory clearly applies.\n\n"
         "Respond with valid JSON only — no prose, no markdown fences.\n"
-        "Schema: {\"symptom_id\": str, \"root_cause_id\": str, "
-        "\"reasoning\": str, \"confidence\": float}\n"
+        "Schema: {\"symptom_id\": str, \"reasoning\": str, \"confidence\": float}\n"
         "confidence is a float between 0.0 and 1.0."
     )
 
@@ -233,7 +285,7 @@ class ClassifierAgent:
         self.config = config
         self.agent = ChatAgent(
             system_message=BaseMessage.make_assistant_message(
-                role_name="Classifier",
+                role_name="Symptom Classifier",
                 content=self.SYSTEM_PROMPT,
             ),
             model=model,
@@ -241,79 +293,184 @@ class ClassifierAgent:
         )
 
     def classify(self, issue: dict) -> dict:
-        """Initial classification from issue text."""
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
             f"{_format_issue_context(issue)}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
-            f"{ROOT_CAUSE_TAXONOMY}\n"
-            "Classify the symptom and root cause of this issue. "
-            "Respond with JSON only."
+            "Classify the symptom only. Respond with JSON only."
         )
         response = self.agent.step(
-            BaseMessage.make_user_message(
-                role_name="Researcher", content=prompt)
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
         )
         self.agent.reset()
         return parse_json(response.msg.content,
                           default={"symptom_id": "A",
-                                   "root_cause_id": "E",
                                    "reasoning": "parse failed",
                                    "confidence": 0.0})
 
-    def rebut(self, issue: dict, current_label: dict,
-              challenge: str) -> dict:
-        """
-        Responds to the critic's challenge.
-        May revise the label or defend the original with stronger reasoning.
-        """
+    def rebut(self, issue: dict, current: dict, challenge: str) -> dict:
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
             f"{_format_issue_context(issue)}\n\n"
-            f"Your current classification:\n"
-            f"  Symptom ID: {current_label.get('symptom_id')}\n"
-            f"  Root cause ID: {current_label.get('root_cause_id')}\n"
-            f"  Reasoning: {current_label.get('reasoning')}\n\n"
+            f"Your current symptom classification:\n"
+            f"  symptom_id: {current.get('symptom_id')}\n"
+            f"  Reasoning: {current.get('reasoning')}\n\n"
             f"Critic's challenge:\n{challenge}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
-            f"{ROOT_CAUSE_TAXONOMY}\n"
-            "Respond to the challenge. You may revise your classification "
-            "if the critic raises a valid point, or defend your original "
-            "label with stronger evidence. Respond with JSON only."
+            "Respond to the challenge. Revise if the critic raises a valid point, "
+            "or defend with stronger evidence. Respond with JSON only."
         )
         response = self.agent.step(
-            BaseMessage.make_user_message(
-                role_name="Researcher", content=prompt)
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
+        )
+        self.agent.reset()
+        return parse_json(response.msg.content, default=current)
+
+
+# ---------------------------------------------------------------------------
+# Agent 1b: RootCauseClassifierAgent
+# ---------------------------------------------------------------------------
+
+class RootCauseClassifierAgent:
+    """
+    Classifies ONLY the root cause, receiving the settled symptom as context.
+    Unchanged from original ClassifierAgent except scope is root-cause-only.
+    Returns JSON: {root_cause_id, reasoning, confidence}
+    """
+
+    SYSTEM_PROMPT = (
+        "You are an expert in analyzing JavaScript-based deep learning systems bugs.\n\n"
+        "Given a GitHub issue and its confirmed symptom, classify ONLY the root cause ID.\n\n"
+        "Rules:\n"
+        "- Use ONLY the provided taxonomy IDs — do not invent new ones.\n"
+        "- Always use a subcategory ID (e.g. A.4 not just A).\n"
+        "- Use E only when the root cause truly cannot be determined.\n\n"
+        "Respond with valid JSON only — no prose, no markdown fences.\n"
+        "Schema: {\"root_cause_id\": str, \"reasoning\": str, \"confidence\": float}\n"
+        "confidence is a float between 0.0 and 1.0."
+    )
+
+    def __init__(self, config: Stage3Config, model):
+        self.config = config
+        self.agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="Root Cause Classifier",
+                content=self.SYSTEM_PROMPT,
+            ),
+            model=model,
+            token_limit=config.model.token_limit,
+        )
+
+    def classify(self, issue: dict, symptom_id: str) -> dict:
+        prompt = (
+            f"Issue: {issue['repo']}#{issue['issue_number']}\n"
+            f"{_format_issue_context(issue)}\n\n"
+            f"Confirmed symptom: {_symptom_context(symptom_id)}\n\n"
+            f"{ROOT_CAUSE_TAXONOMY}\n"
+            "Classify the root cause only. Respond with JSON only."
+        )
+        response = self.agent.step(
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
         )
         self.agent.reset()
         return parse_json(response.msg.content,
-                          default=current_label)
+                          default={"root_cause_id": "E",
+                                   "reasoning": "parse failed",
+                                   "confidence": 0.0})
+
+    def rebut(self, issue: dict, symptom_id: str,
+              current: dict, challenge: str) -> dict:
+        prompt = (
+            f"Issue: {issue['repo']}#{issue['issue_number']}\n"
+            f"{_format_issue_context(issue)}\n\n"
+            f"Confirmed symptom: {_symptom_context(symptom_id)}\n\n"
+            f"Your current root cause classification:\n"
+            f"  root_cause_id: {current.get('root_cause_id')}\n"
+            f"  Reasoning: {current.get('reasoning')}\n\n"
+            f"Critic's challenge:\n{challenge}\n\n"
+            f"{ROOT_CAUSE_TAXONOMY}\n"
+            "Respond to the challenge. Revise if the critic raises a valid point, "
+            "or defend with stronger evidence. Respond with JSON only."
+        )
+        response = self.agent.step(
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
+        )
+        self.agent.reset()
+        return parse_json(response.msg.content, default=current)
 
 
 # ---------------------------------------------------------------------------
-# Agent 2: CriticAgent
+# Agent 2a: SymptomCriticAgent
 # ---------------------------------------------------------------------------
 
-class CriticAgent:
+class SymptomCriticAgent:
     """
-    CAMEL ChatAgent that challenges the ClassifierAgent's label.
-
-    Looks for:
-      - Alternative labels that fit better
-      - Weak or missing evidence in the reasoning
-      - Conflation of symptom with root cause
-      - Over-generalisation to Unknown when a specific label is possible
-
-    Returns a plain text challenge (not JSON — deliberate, natural debate).
+    Challenges the symptom classification.
+    Same logic as original CriticAgent, scoped to symptom only.
+    Returns plain text (not JSON).
     """
 
     SYSTEM_PROMPT = (
         "You are a senior software engineering researcher critically "
-        "reviewing a fault taxonomy classification.\n\n"
+        "reviewing a bug SYMPTOM classification.\n\n"
         "Your job is to challenge the classification if you see weaknesses:\n"
         "1. Is there a more specific label that fits better?\n"
         "2. Is the reasoning consistent with the issue evidence?\n"
         "3. Is the symptom being confused with the root cause?\n"
+        "4. Is a top-level ID used when a subcategory is determinable?\n\n"
+        "Be direct and specific. Reference the taxonomy labels by name.\n"
+        "If the classification is genuinely strong, say so briefly and "
+        "explain why — do not challenge for the sake of it.\n\n"
+        "Respond in plain text (not JSON)."
+    )
+
+    def __init__(self, config: Stage3Config, model):
+        self.config = config
+        self.agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="Symptom Critic",
+                content=self.SYSTEM_PROMPT,
+            ),
+            model=model,
+            token_limit=config.model.token_limit,
+        )
+
+    def challenge(self, issue: dict, label: dict) -> str:
+        prompt = (
+            f"Issue: {issue['repo']}#{issue['issue_number']}\n"
+            f"{_format_issue_context(issue)}\n\n"
+            f"Proposed symptom classification:\n"
+            f"  symptom_id : {label.get('symptom_id')}\n"
+            f"  Reasoning  : {label.get('reasoning')}\n"
+            f"  Confidence : {label.get('confidence')}\n\n"
+            f"{SYMPTOM_TAXONOMY}\n"
+            "Challenge this symptom classification if warranted. Be specific."
+        )
+        response = self.agent.step(
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
+        )
+        self.agent.reset()
+        return response.msg.content.strip()
+
+
+# ---------------------------------------------------------------------------
+# Agent 2b: RootCauseCriticAgent
+# ---------------------------------------------------------------------------
+
+class RootCauseCriticAgent:
+    """
+    Challenges the root cause classification.
+    Same logic as original CriticAgent, scoped to root cause only.
+    Returns plain text (not JSON).
+    """
+
+    SYSTEM_PROMPT = (
+        "You are a senior software engineering researcher critically "
+        "reviewing a bug ROOT CAUSE classification.\n\n"
+        "Your job is to challenge the classification if you see weaknesses:\n"
+        "1. Is there a more specific label that fits better?\n"
+        "2. Is the reasoning consistent with the issue evidence?\n"
+        "3. Is the root cause being confused with the symptom?\n"
         "4. Is 'Unknown' being used too hastily when a label is determinable?\n\n"
         "Be direct and specific. Reference the taxonomy labels by name.\n"
         "If the classification is genuinely strong, say so briefly and "
@@ -325,116 +482,145 @@ class CriticAgent:
         self.config = config
         self.agent = ChatAgent(
             system_message=BaseMessage.make_assistant_message(
-                role_name="Critic",
+                role_name="Root Cause Critic",
                 content=self.SYSTEM_PROMPT,
             ),
             model=model,
             token_limit=config.model.token_limit,
         )
 
-    def challenge(self, issue: dict, label: dict) -> str:
+    def challenge(self, issue: dict, symptom_id: str, label: dict) -> str:
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
             f"{_format_issue_context(issue)}\n\n"
-            f"Proposed classification:\n"
-            f"  Symptom ID   : {label.get('symptom_id')}\n"
-            f"  Root cause ID: {label.get('root_cause_id')}\n"
-            f"  Reasoning    : {label.get('reasoning')}\n"
-            f"  Confidence   : {label.get('confidence')}\n\n"
-            f"{SYMPTOM_TAXONOMY}\n"
+            f"Confirmed symptom: {_symptom_context(symptom_id)}\n\n"
+            f"Proposed root cause classification:\n"
+            f"  root_cause_id : {label.get('root_cause_id')}\n"
+            f"  Reasoning     : {label.get('reasoning')}\n"
+            f"  Confidence    : {label.get('confidence')}\n\n"
             f"{ROOT_CAUSE_TAXONOMY}\n"
-            "Challenge this classification if warranted. Be specific."
+            "Challenge this root cause classification if warranted. Be specific."
         )
         response = self.agent.step(
-            BaseMessage.make_user_message(
-                role_name="Researcher", content=prompt)
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
         )
         self.agent.reset()
         return response.msg.content.strip()
 
 
 # ---------------------------------------------------------------------------
-# Agent 3: ResolverAgent
+# Agent 3a: SymptomResolverAgent
 # ---------------------------------------------------------------------------
 
-class ResolverAgent:
+class SymptomResolverAgent:
     """
-    CAMEL ChatAgent that reads the full debate transcript and makes
-    the final taxonomy decision.
-
-    Key design choice: the Resolver is NOT the Classifier — it has not
-    been anchored to the first label and can freely choose any taxonomy
-    entry based on the full evidence and debate.
-
-    Returns JSON: {symptom_id, root_cause_id, reasoning, confidence}
-    confidence >= threshold means the debate stops.
+    Reads the symptom debate transcript and makes the final symptom decision.
+    Same logic as original ResolverAgent, scoped to symptom only.
+    Returns JSON: {symptom_id, reasoning, confidence}
     """
 
     SYSTEM_PROMPT = (
         "You are a principal software engineering researcher making a "
-        "final fault taxonomy classification decision.\n\n"
+        "final BUG SYMPTOM classification decision.\n\n"
         "You will receive the full debate between a classifier and a critic. "
         "Your job is to:\n"
         "1. Weigh the arguments from both sides objectively.\n"
-        "2. Select the most accurate symptom_id and root_cause_id from the taxonomy.\n"
+        "2. Select the most accurate symptom_id from the taxonomy.\n"
         "3. Assign a confidence score reflecting how certain you are.\n\n"
         "Use ONLY the provided taxonomy IDs.\n"
         "A high confidence (>= 0.8) means the debate can stop.\n"
         "A low confidence (< 0.8) means another round may help.\n\n"
         "Respond with valid JSON only — no prose, no markdown fences.\n"
-        "Schema: {\"symptom_id\": str, \"root_cause_id\": str, "
-        "\"reasoning\": str, \"confidence\": float}"
+        "Schema: {\"symptom_id\": str, \"reasoning\": str, \"confidence\": float}"
     )
 
     def __init__(self, config: Stage3Config, model):
         self.config = config
         self.agent = ChatAgent(
             system_message=BaseMessage.make_assistant_message(
-                role_name="Resolver",
+                role_name="Symptom Resolver",
                 content=self.SYSTEM_PROMPT,
             ),
             model=model,
             token_limit=config.model.token_limit,
         )
 
-    def resolve(self, issue: dict, debate_transcript: list) -> dict:
-        # Format the full debate for the resolver
-        transcript_text = self._format_transcript(debate_transcript)
+    def resolve(self, issue: dict, transcript: list) -> dict:
+        transcript_text = _format_transcript(transcript)
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
             f"{_format_issue_context(issue)}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
-            f"{ROOT_CAUSE_TAXONOMY}\n"
             f"Debate transcript:\n{transcript_text}\n\n"
-            "Based on the full debate above, make the final classification. "
+            "Based on the full debate above, make the final symptom classification. "
             "Respond with JSON only."
         )
         response = self.agent.step(
-            BaseMessage.make_user_message(
-                role_name="Researcher", content=prompt)
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
         )
         self.agent.reset()
         return parse_json(response.msg.content,
                           default={"symptom_id": "A",
-                                   "root_cause_id": "E",
                                    "reasoning": "parse failed",
                                    "confidence": 0.0})
 
-    @staticmethod
-    def _format_transcript(transcript: list) -> str:
-        lines = []
-        for turn in transcript:
-            r = turn["round"]
-            lines += [
-                f"--- Round {r} ---",
-                f"Classifier: symptom_id={turn['symptom_id']}, "
-                f"root_cause_id={turn['root_cause_id']}",
-                f"  Reasoning: {turn['classifier_reasoning']}",
-                f"Critic: {turn['challenge']}",
-                f"Classifier rebuttal: {turn['rebuttal']}",
-                "",
-            ]
-        return "\n".join(lines)
+
+# ---------------------------------------------------------------------------
+# Agent 3b: RootCauseResolverAgent
+# ---------------------------------------------------------------------------
+
+class RootCauseResolverAgent:
+    """
+    Reads the root cause debate transcript and makes the final root cause decision.
+    Same logic as original ResolverAgent, scoped to root cause only.
+    Returns JSON: {root_cause_id, reasoning, confidence}
+    """
+
+    SYSTEM_PROMPT = (
+        "You are a principal software engineering researcher making a "
+        "final ROOT CAUSE classification decision.\n\n"
+        "You will receive the full debate between a classifier and a critic. "
+        "Your job is to:\n"
+        "1. Weigh the arguments from both sides objectively.\n"
+        "2. Select the most accurate root_cause_id from the taxonomy.\n"
+        "3. Assign a confidence score reflecting how certain you are.\n\n"
+        "Use ONLY the provided taxonomy IDs.\n"
+        "A high confidence (>= 0.8) means the debate can stop.\n"
+        "A low confidence (< 0.8) means another round may help.\n\n"
+        "Respond with valid JSON only — no prose, no markdown fences.\n"
+        "Schema: {\"root_cause_id\": str, \"reasoning\": str, \"confidence\": float}"
+    )
+
+    def __init__(self, config: Stage3Config, model):
+        self.config = config
+        self.agent = ChatAgent(
+            system_message=BaseMessage.make_assistant_message(
+                role_name="Root Cause Resolver",
+                content=self.SYSTEM_PROMPT,
+            ),
+            model=model,
+            token_limit=config.model.token_limit,
+        )
+
+    def resolve(self, issue: dict, symptom_id: str, transcript: list) -> dict:
+        transcript_text = _format_transcript(transcript)
+        prompt = (
+            f"Issue: {issue['repo']}#{issue['issue_number']}\n"
+            f"{_format_issue_context(issue)}\n\n"
+            f"Confirmed symptom: {_symptom_context(symptom_id)}\n\n"
+            f"{ROOT_CAUSE_TAXONOMY}\n"
+            f"Debate transcript:\n{transcript_text}\n\n"
+            "Based on the full debate above, make the final root cause classification. "
+            "Respond with JSON only."
+        )
+        response = self.agent.step(
+            BaseMessage.make_user_message(role_name="Researcher", content=prompt)
+        )
+        self.agent.reset()
+        return parse_json(response.msg.content,
+                          default={"root_cause_id": "E",
+                                   "reasoning": "parse failed",
+                                   "confidence": 0.0})
 
 
 # ---------------------------------------------------------------------------
@@ -443,36 +629,32 @@ class ResolverAgent:
 
 class Stage3Pipeline:
     """
-    Orchestrates the debate loop per issue:
+    Two-phase debate pipeline per issue:
 
-      ClassifierAgent (initial label)
+    Phase 1 — Symptom debate:
+      SymptomClassifier → SymptomCritic → SymptomClassifier → SymptomResolver
+      (repeat until confidence >= threshold or max_rounds)
             ↓
-      CriticAgent (challenge)
-            ↓
-      ClassifierAgent (rebuttal)
-            ↓
-      ResolverAgent (interim decision + confidence)
-            ↓
-      if confidence < threshold AND rounds < max_rounds → repeat
-      else → final decision
+      settled symptom_id passed as context to Phase 2
+
+    Phase 2 — Root cause debate:
+      RootCauseClassifier → RootCauseCritic → RootCauseClassifier → RootCauseResolver
+      (repeat until confidence >= threshold or max_rounds)
     """
 
     def __init__(self, config: Optional[Stage3Config] = None):
         self.config = config or Stage3Config()
         model = build_model(self.config.model)
-        self.classifier = ClassifierAgent(self.config, model)
-        self.critic = CriticAgent(self.config, model)
-        self.resolver = ResolverAgent(self.config, model)
+        self.symptom_classifier = SymptomClassifierAgent(self.config, model)
+        self.symptom_critic = SymptomCriticAgent(self.config, model)
+        self.symptom_resolver = SymptomResolverAgent(self.config, model)
+        self.rc_classifier = RootCauseClassifierAgent(self.config, model)
+        self.rc_critic = RootCauseCriticAgent(self.config, model)
+        self.rc_resolver = RootCauseResolverAgent(self.config, model)
 
     def load_issues_from_csv(self, csv_path: str) -> list:
         """
         Load fault issues directly from clean_CollectedIssues.csv.
-
-        Columns used:
-          Faults           — GitHub issue URL (repo + issue_number)
-          title, body, state, created_at, comments_content
-          symptom_id       — ground truth symptom label
-          root_causes_id   — ground truth root cause label
         """
         issues = []
         with open(csv_path, newline="", encoding="utf-8") as f:
@@ -481,8 +663,6 @@ class Stage3Pipeline:
                 url = row.get("Faults", "").strip()
                 if not url:
                     continue
-                # Parse repo and issue_number from URL
-                # e.g. https://github.com/owner/repo/issues/123
                 parts = url.rstrip("/").split("/")
                 try:
                     issues_idx = parts.index("issues")
@@ -538,59 +718,102 @@ class Stage3Pipeline:
         return output
 
     def _classify_with_debate(self, issue: dict) -> TaxonomyDecision:
-        transcript = []
-        current_label = self.classifier.classify(issue)
-        final_decision = current_label
-        rounds_completed = 0
+        sym_transcript = []
+        rc_transcript = []
+
+        # ── Phase 1: Symptom debate ──────────────────────────────────────
+        print(f"           [Symptom debate]")
+        sym_label = self.symptom_classifier.classify(issue)
+        sym_final = sym_label
+        sym_rounds = 0
 
         for round_num in range(1, self.config.max_rounds + 1):
-            print(f"           Round {round_num}: classifying...", end=" ")
+            print(f"             Round {round_num}...", end=" ")
 
-            # Critic challenges
-            challenge = self.critic.challenge(issue, current_label)
+            challenge = self.symptom_critic.challenge(issue, sym_label)
+            rebuttal = self.symptom_classifier.rebut(issue, sym_label, challenge)
 
-            # Classifier rebuts
-            rebuttal = self.classifier.rebut(issue, current_label, challenge)
-
-            # Log this round
-            transcript.append({
+            sym_transcript.append({
                 "round": round_num,
-                "symptom_id": current_label.get("symptom_id", ""),
-                "root_cause_id": current_label.get("root_cause_id", ""),
-                "classifier_reasoning": current_label.get("reasoning", ""),
+                "label_id": sym_label.get("symptom_id", ""),
+                "classifier_reasoning": sym_label.get("reasoning", ""),
                 "challenge": challenge,
                 "rebuttal": rebuttal.get("reasoning", ""),
             })
 
-            # Update current label to rebuttal
-            current_label = rebuttal
-            rounds_completed = round_num
+            sym_label = rebuttal
+            sym_rounds = round_num
 
-            # Resolver makes interim decision
-            resolver_result = self.resolver.resolve(issue, transcript)
-            confidence = float(resolver_result.get("confidence", 0.0))
-            final_decision = resolver_result
+            resolver_result = self.symptom_resolver.resolve(issue, sym_transcript)
+            sym_conf = float(resolver_result.get("confidence", 0.0))
+            sym_final = resolver_result
 
-            print(f"conf={confidence:.2f}")
+            print(f"conf={sym_conf:.2f}")
 
-            # Stop if resolver is confident enough
-            if confidence >= self.config.confidence_threshold:
-                print(f"           Confident — stopping after round {round_num}")
+            if sym_conf >= self.config.confidence_threshold:
+                print(f"             Confident — stopping symptom debate")
                 break
             elif round_num < self.config.max_rounds:
-                print(f"           Low confidence — continuing debate...")
-            else:
-                print(f"           Max rounds reached — accepting best decision")
+                print(f"             Low confidence — continuing...")
+
+        settled_symptom = sym_final.get("symptom_id", "A")
+        print(f"           Settled symptom: {settled_symptom}")
+
+        # ── Phase 2: Root cause debate (uses settled symptom) ────────────
+        print(f"           [Root cause debate]")
+        rc_label = self.rc_classifier.classify(issue, settled_symptom)
+        rc_final = rc_label
+        rc_rounds = 0
+
+        for round_num in range(1, self.config.max_rounds + 1):
+            print(f"             Round {round_num}...", end=" ")
+
+            challenge = self.rc_critic.challenge(issue, settled_symptom, rc_label)
+            rebuttal = self.rc_classifier.rebut(
+                issue, settled_symptom, rc_label, challenge)
+
+            rc_transcript.append({
+                "round": round_num,
+                "label_id": rc_label.get("root_cause_id", ""),
+                "classifier_reasoning": rc_label.get("reasoning", ""),
+                "challenge": challenge,
+                "rebuttal": rebuttal.get("reasoning", ""),
+            })
+
+            rc_label = rebuttal
+            rc_rounds = round_num
+
+            resolver_result = self.rc_resolver.resolve(
+                issue, settled_symptom, rc_transcript)
+            rc_conf = float(resolver_result.get("confidence", 0.0))
+            rc_final = resolver_result
+
+            print(f"conf={rc_conf:.2f}")
+
+            if rc_conf >= self.config.confidence_threshold:
+                print(f"             Confident — stopping root cause debate")
+                break
+            elif round_num < self.config.max_rounds:
+                print(f"             Low confidence — continuing...")
 
         return TaxonomyDecision(
             issue_number=issue["issue_number"],
             repo=issue["repo"],
-            symptom_id=final_decision.get("symptom_id", "A"),
-            root_cause_id=final_decision.get("root_cause_id", "E"),
-            reasoning=final_decision.get("reasoning", ""),
-            confidence=float(final_decision.get("confidence", 0.0)),
-            debate_rounds=rounds_completed,
-            debate_transcript=transcript,
+            symptom_id=sym_final.get("symptom_id", "A"),
+            root_cause_id=rc_final.get("root_cause_id", "E"),
+            reasoning=(
+                f"Symptom: {sym_final.get('reasoning', '')}\n"
+                f"Root cause: {rc_final.get('reasoning', '')}"
+            ),
+            confidence=round(
+                (float(sym_final.get("confidence", 0.0)) +
+                 float(rc_final.get("confidence", 0.0))) / 2, 4
+            ),
+            debate_rounds=sym_rounds + rc_rounds,
+            debate_transcript={
+                "symptom": sym_transcript,
+                "root_cause": rc_transcript,
+            },
             ground_truth_symptom=issue.get("ground_truth_symptom", ""),
             ground_truth_root_cause=issue.get("ground_truth_root_cause", ""),
         )
@@ -634,7 +857,7 @@ class Stage3Pipeline:
 
 
 # ---------------------------------------------------------------------------
-# Standalone entry point
+# Standalone entry point  (unchanged from your original)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -649,7 +872,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-issues", type=int, default=None,
                         help="Cap on number of issues to process (default: all)")
     parser.add_argument("--max-rounds", type=int, default=3,
-                        help="Max debate rounds per issue (default: 3)")
+                        help="Max debate rounds per issue per phase (default: 3)")
     parser.add_argument("--confidence-threshold", type=float, default=0.80,
                         help="Resolver confidence threshold to stop debate (default: 0.80)")
     args = parser.parse_args()
@@ -668,7 +891,6 @@ if __name__ == "__main__":
     if args.csv_path:
         issues = pipeline.load_issues_from_csv(args.csv_path)
     else:
-        # Load fault_related issues from Stage II output
         stage2_path = "outputs/stage2_output.json"
         if os.path.exists(stage2_path):
             with open(stage2_path) as f:

@@ -24,6 +24,7 @@ Taxonomy source: Quan et al. ASE 2022
   Root causes : 5 primary, 17 subcategories
 """
 
+import csv
 import json
 import os
 import sys
@@ -46,61 +47,82 @@ from tools.models import ModelConfig, build_model, parse_json
 # ---------------------------------------------------------------------------
 
 SYMPTOM_TAXONOMY = """
-Symptom Taxonomy (from Quan et al. 2022):
+Bug Symptom Taxonomy (AutoEmpirical — Quan et al. 2022):
 
-1. Crash
-   1.1 System Crash       — application or runtime crashes entirely
-   1.2 Silent Crash       — crashes without error message
+[A] Crash — functionality terminated unexpectedly with error messages
+  [A.1] Reference Error
+        A.1.1 DL Operator Exception: DL-related function exceptions
+        A.1.2 Function Inaccessible: Traditional function exceptions
+        A.1.3 Tensor Disposed: Disposed tensors accessed by program
+        A.1.4 Attribute/Return Value Undefined: Undefined variable properties or function return values
+        A.1.5 Training Argument Exception: Issues with training arguments
+  [A.2] Data & Model Error
+        A.2.1 Tensor Shape/Type/Value Error: Incorrect data types, shapes, or values for DL tensors
+        A.2.2 JS Variable Shape/Type/Value Error: Incorrect data types, shapes, or values for JS variables
+        A.2.3 Model Usage/Design Error: Failure in model usage or structure construction
+  [A.3] Fetch Failure — crashes during web API requests for model files or data (e.g. same-origin policy)
+  [A.4] Browser & Device Error — crashes showing browser or device problems (e.g. WebGL not supported)
 
-2. Poor Performance
-   2.1 Memory Leak        — memory grows unboundedly
-   2.2 Out of Memory      — OOM error during execution
-   2.3 Slow Execution     — noticeably degraded speed
+[B] Poor Performance — slows execution, consumes excessive resources, bad user experience
+  [B.1] Time
+        B.1.1 Slow Execution: Systems work but are extremely slow during DL tasks
+        B.1.2 Browser Hangs: Systems cease to respond; browser becomes unresponsive
+  [B.2] Memory
+        B.2.1 Memory Leak: Gradual increase in memory usage over time
+        B.2.2 Out of Memory: System terminates due to insufficient memory
+        B.2.3 Abnormal GPU Memory/Utilization: Unexpectedly high or low GPU memory usage
+  [B.3] Others
+        B.3.1 Regression: Performance issues occurring after TensorFlow.js upgrades
+        B.3.2 Unstable: Inference results are inconsistent or unstable
 
-3. Build & Initialization Failure
-   3.1 Build Failure      — fails during compilation or build
-   3.2 Load Failure       — model or module fails to load
-   3.3 Initialization Failure — fails during setup/init
+[C] Build & Initialization Failure — failures during build, install, or initialization of DL environments
+  C.1 TF.js/JS Application Compile Failure
+  C.2 npm Package Installation Failure
+  C.3 Multi-backend Initialization Failure
 
-4. Incorrect Functionality
-   4.1 Incorrect Output   — wrong computation result
-   4.2 Reference Error
-       4.2.1 DL Operator Exception  — error in DL op execution
-       4.2.2 Function Inaccessible  — function cannot be called
-   4.3 Hanging            — program hangs or deadlocks
+[D] Incorrect Functionality — systems run without crashes but produce incorrect results
+  D.1 Inconsistency between Backends/Platforms/Devices
+  D.2 Poor Accuracy
+  D.3 Inf/None/Null Results
+  D.4 Others
 
-5. Document Error
-   5.1 Missing Documentation  — docs absent or incomplete
-   5.2 Incorrect Documentation — docs contradict actual behaviour
+[E] Document Error — invalid links, incorrect instructions, or missing tutorials in official docs
+
+Output the most specific ID that matches (e.g. A.1 for Reference Error crash, B.2.1 for Memory Leak).
+Use top-level IDs (C, D, E) when the issue fits the category but no subcategory is clearly applicable.
 """
 
 ROOT_CAUSE_TAXONOMY = """
-Root Cause Taxonomy (from Quan et al. 2022):
+Root Cause Taxonomy (AutoEmpirical — Quan et al. 2022):
 
-1. Incorrect Programming
-   1.1 Algorithm Error          — wrong algorithm or logic
-   1.2 Unimplemented Operator   — op not implemented for backend
-   1.3 Inconsistent Modules in TF.js — mismatch between modules
-   1.4 Incorrect Type Conversion — wrong dtype handling
-   1.5 Incorrect Shape Handling  — tensor shape errors
+[A] Incorrect Programming — faults caused by code implementation issues
+  [A.1] Unimplemented Operator — DL operators not yet supported/implemented by TF.js
+  [A.2] Inconsistent Modules in TF.js — inconsistent implementations between TF.js modules
+  [A.3] API Misuse — misunderstanding of APIs: missing/redundant calls, wrong names, invalid params
+  [A.4] Incorrect Code Logic — faulty implementation in DL algorithms, memory management, or env adaptability
+  [A.5] Incompatibility between 3rd-party DL Library and TF.js — version mismatches with 3rd-party DL libs
+  [A.6] Import Error — missing/incorrect import of TF.js or importing multiple versions simultaneously
+  [A.7] Improper Exception Handling — missing exceptions, suspicious exceptions, or confusing error messages
 
-2. Configuration & Dependency Error
-   2.1 Version Incompatibility  — version mismatch between deps
-   2.2 Missing Dependency       — required dep not present
-   2.3 Incorrect Configuration  — wrong config values
+[B] Configuration & Dependency Error — faults caused by incorrect configuration and dependencies
+  [B.1] Multi-environment Misconfiguration — incorrect bundler configs for heterogeneous environments
+  [B.2] Dependency Error — missing/redundant deps, version mismatches, or security vulnerabilities
+  [B.3] Untimely Update — issues from not updating tensorflow.so or npm packages in time
+  [B.4] Confused Document — problems caused by unclear or incorrect TF.js documentation
 
-3. Data/Model Error
-   3.1 Unsupported Model        — model not supported by backend
-   3.2 Incorrect Input Data     — wrong input format or values
-   3.3 Numerical Instability    — NaN, Inf, precision issues
+[C] Data/Model Error — faults introduced by DL models and data
+  [C.1] Data/Model Inaccessibility — data/models cannot be accessed (browser limits, wrong paths)
+  [C.2] Improper Model/Tensor Attribute — poor model design, improper parameters, or inappropriate model size
 
-4. Execution Environment Error
-   4.1 Platform Incompatibility — fails on specific platform/OS
-   4.2 WebGL Error              — WebGL backend specific error
-   4.3 Memory Management Error  — incorrect memory handling
+[D] Execution Environment Error — faults from imperfect support for hardware/software environments
+  [D.1] Device Incompatibility — issues on specific hardware and operating systems
+  [D.2] Browser Incompatibility — compatibility issues with PC or mobile browsers
+  [D.3] Cross-platform App Framework Incompatibility — incompatibility with React Native, Electron, etc.
+  [D.4] WebGL Limits — faults caused by inherited limitations of WebGL
 
-5. Unknown
-   5.1 Unknown                  — cannot determine root cause
+[E] Unknown — root cause is difficult to analyze or unclear from available information
+
+Output the subcategory ID (e.g. A.4, B.2, D.2). Use E only when the root cause truly cannot be determined.
 """
 
 
@@ -121,6 +143,9 @@ class Stage3Config:
     # Cap for testing — None means process all
     max_issues: Optional[int] = None
 
+    # Optional: load directly from clean_CollectedIssues.csv (skips stage2)
+    csv_path: Optional[str] = None
+
     # LLM backend
     model: ModelConfig = field(default_factory=ModelConfig)
 
@@ -132,7 +157,7 @@ class Stage3Config:
 @dataclass
 class DebateRound:
     round_number: int
-    classifier_label: dict      # {symptom, root_cause, reasoning}
+    classifier_label: dict      # {symptom_id, root_cause_id, reasoning}
     critic_challenge: str
     classifier_rebuttal: str
 
@@ -141,17 +166,40 @@ class DebateRound:
 class TaxonomyDecision:
     issue_number: int
     repo: str
-    symptom: str                # leaf-level symptom label
-    root_cause: str             # subcategory-level root cause label
+    symptom_id: str             # symptom taxonomy ID (e.g. A.1, B.2.1, C)
+    root_cause_id: str          # root cause taxonomy ID (e.g. A.4, B.2)
     reasoning: str
     confidence: float
     debate_rounds: int
     debate_transcript: list     # list of DebateRound dicts
+    ground_truth_symptom: str = ""
+    ground_truth_root_cause: str = ""
 
 
 # ---------------------------------------------------------------------------
 # Agent 1: ClassifierAgent
 # ---------------------------------------------------------------------------
+
+def _format_issue_context(issue: dict) -> str:
+    """Build the issue context block passed to every Stage 3 agent prompt.
+
+    Uses full issue content (title, body, comments) when available.
+    Falls back to Stage 2 reasoning when running after Stage 2 without CSV.
+    """
+    parts = []
+    if issue.get("title"):
+        parts.append(f"Title: {issue['title']}")
+    if issue.get("state"):
+        parts.append(f"State: {issue['state']}")
+    if issue.get("body"):
+        parts.append(f"\nBody:\n{issue['body']}")
+    if issue.get("comments_content"):
+        parts.append(f"\nComments:\n{issue['comments_content']}")
+    if issue.get("reasoning") and not issue.get("body"):
+        # Fallback: use Stage 2 reasoning when no raw content is available
+        parts.append(f"\nStage 2 analysis:\n{issue['reasoning']}")
+    return "\n".join(parts) if parts else "(no issue content available)"
+
 
 class ClassifierAgent:
     """
@@ -161,19 +209,22 @@ class ClassifierAgent:
     On subsequent calls: rebuts the critic's challenge, potentially
     revising or defending the original label.
 
-    Returns JSON: {symptom, root_cause, reasoning, confidence}
+    Returns JSON: {symptom_id, root_cause_id, reasoning, confidence}
     """
 
     SYSTEM_PROMPT = (
-        "You are a software engineering researcher specialising in "
-        "empirical fault taxonomy classification.\n\n"
-        "You will be given a GitHub issue and must classify it into:\n"
-        "  1. A symptom category (what went wrong externally)\n"
-        "  2. A root cause category (why it went wrong internally)\n\n"
-        "Use ONLY the provided taxonomy labels — do not invent new ones.\n"
-        "Choose the most specific (leaf-level) label that fits.\n\n"
+        "You are an expert in analyzing JavaScript-based deep learning systems bugs.\n\n"
+        "Given a GitHub issue, classify it into:\n"
+        "  1. symptom_id  — the bug symptom ID from the taxonomy (e.g. A.1, B.2.1, C, D)\n"
+        "  2. root_cause_id — the root cause ID from the taxonomy (e.g. A.4, B.2, D.2)\n\n"
+        "Rules:\n"
+        "- Use ONLY the provided taxonomy IDs — do not invent new ones.\n"
+        "- Choose the most specific ID that fits the evidence.\n"
+        "- Use top-level IDs (C, D, E) only when no subcategory clearly applies.\n"
+        "- For root cause, always use a subcategory ID (e.g. A.4 not just A); use E only "
+        "when the root cause truly cannot be determined.\n\n"
         "Respond with valid JSON only — no prose, no markdown fences.\n"
-        "Schema: {\"symptom\": str, \"root_cause\": str, "
+        "Schema: {\"symptom_id\": str, \"root_cause_id\": str, "
         "\"reasoning\": str, \"confidence\": float}\n"
         "confidence is a float between 0.0 and 1.0."
     )
@@ -193,7 +244,7 @@ class ClassifierAgent:
         """Initial classification from issue text."""
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
-            f"Reasoning: {issue.get('reasoning', '')}\n\n"
+            f"{_format_issue_context(issue)}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
             f"{ROOT_CAUSE_TAXONOMY}\n"
             "Classify the symptom and root cause of this issue. "
@@ -205,8 +256,8 @@ class ClassifierAgent:
         )
         self.agent.reset()
         return parse_json(response.msg.content,
-                          default={"symptom": "Unknown",
-                                   "root_cause": "5.1 Unknown",
+                          default={"symptom_id": "A",
+                                   "root_cause_id": "E",
                                    "reasoning": "parse failed",
                                    "confidence": 0.0})
 
@@ -218,10 +269,10 @@ class ClassifierAgent:
         """
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
-            f"Reasoning from issue: {issue.get('reasoning', '')}\n\n"
+            f"{_format_issue_context(issue)}\n\n"
             f"Your current classification:\n"
-            f"  Symptom: {current_label.get('symptom')}\n"
-            f"  Root cause: {current_label.get('root_cause')}\n"
+            f"  Symptom ID: {current_label.get('symptom_id')}\n"
+            f"  Root cause ID: {current_label.get('root_cause_id')}\n"
             f"  Reasoning: {current_label.get('reasoning')}\n\n"
             f"Critic's challenge:\n{challenge}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
@@ -284,12 +335,12 @@ class CriticAgent:
     def challenge(self, issue: dict, label: dict) -> str:
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
-            f"Issue reasoning: {issue.get('reasoning', '')}\n\n"
+            f"{_format_issue_context(issue)}\n\n"
             f"Proposed classification:\n"
-            f"  Symptom   : {label.get('symptom')}\n"
-            f"  Root cause: {label.get('root_cause')}\n"
-            f"  Reasoning : {label.get('reasoning')}\n"
-            f"  Confidence: {label.get('confidence')}\n\n"
+            f"  Symptom ID   : {label.get('symptom_id')}\n"
+            f"  Root cause ID: {label.get('root_cause_id')}\n"
+            f"  Reasoning    : {label.get('reasoning')}\n"
+            f"  Confidence   : {label.get('confidence')}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
             f"{ROOT_CAUSE_TAXONOMY}\n"
             "Challenge this classification if warranted. Be specific."
@@ -315,7 +366,7 @@ class ResolverAgent:
     been anchored to the first label and can freely choose any taxonomy
     entry based on the full evidence and debate.
 
-    Returns JSON: {symptom, root_cause, reasoning, confidence}
+    Returns JSON: {symptom_id, root_cause_id, reasoning, confidence}
     confidence >= threshold means the debate stops.
     """
 
@@ -325,13 +376,13 @@ class ResolverAgent:
         "You will receive the full debate between a classifier and a critic. "
         "Your job is to:\n"
         "1. Weigh the arguments from both sides objectively.\n"
-        "2. Select the most accurate symptom and root cause labels.\n"
+        "2. Select the most accurate symptom_id and root_cause_id from the taxonomy.\n"
         "3. Assign a confidence score reflecting how certain you are.\n\n"
-        "Use ONLY the provided taxonomy labels.\n"
+        "Use ONLY the provided taxonomy IDs.\n"
         "A high confidence (>= 0.8) means the debate can stop.\n"
         "A low confidence (< 0.8) means another round may help.\n\n"
         "Respond with valid JSON only — no prose, no markdown fences.\n"
-        "Schema: {\"symptom\": str, \"root_cause\": str, "
+        "Schema: {\"symptom_id\": str, \"root_cause_id\": str, "
         "\"reasoning\": str, \"confidence\": float}"
     )
 
@@ -351,7 +402,7 @@ class ResolverAgent:
         transcript_text = self._format_transcript(debate_transcript)
         prompt = (
             f"Issue: {issue['repo']}#{issue['issue_number']}\n"
-            f"Issue reasoning: {issue.get('reasoning', '')}\n\n"
+            f"{_format_issue_context(issue)}\n\n"
             f"{SYMPTOM_TAXONOMY}\n"
             f"{ROOT_CAUSE_TAXONOMY}\n"
             f"Debate transcript:\n{transcript_text}\n\n"
@@ -364,8 +415,8 @@ class ResolverAgent:
         )
         self.agent.reset()
         return parse_json(response.msg.content,
-                          default={"symptom": "Unknown",
-                                   "root_cause": "5.1 Unknown",
+                          default={"symptom_id": "A",
+                                   "root_cause_id": "E",
                                    "reasoning": "parse failed",
                                    "confidence": 0.0})
 
@@ -376,8 +427,8 @@ class ResolverAgent:
             r = turn["round"]
             lines += [
                 f"--- Round {r} ---",
-                f"Classifier: symptom={turn['symptom']}, "
-                f"root_cause={turn['root_cause']}",
+                f"Classifier: symptom_id={turn['symptom_id']}, "
+                f"root_cause_id={turn['root_cause_id']}",
                 f"  Reasoning: {turn['classifier_reasoning']}",
                 f"Critic: {turn['challenge']}",
                 f"Classifier rebuttal: {turn['rebuttal']}",
@@ -413,6 +464,51 @@ class Stage3Pipeline:
         self.critic = CriticAgent(self.config, model)
         self.resolver = ResolverAgent(self.config, model)
 
+    def load_issues_from_csv(self, csv_path: str) -> list:
+        """
+        Load fault issues directly from clean_CollectedIssues.csv.
+
+        Columns used:
+          Faults           — GitHub issue URL (repo + issue_number)
+          title, body, state, created_at, comments_content
+          symptom_id       — ground truth symptom label
+          root_causes_id   — ground truth root cause label
+        """
+        issues = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                url = row.get("Faults", "").strip()
+                if not url:
+                    continue
+                # Parse repo and issue_number from URL
+                # e.g. https://github.com/owner/repo/issues/123
+                parts = url.rstrip("/").split("/")
+                try:
+                    issues_idx = parts.index("issues")
+                    repo = "/".join(parts[issues_idx - 2: issues_idx])
+                    issue_number = int(parts[issues_idx + 1])
+                except (ValueError, IndexError):
+                    continue
+
+                issues.append({
+                    "repo": repo,
+                    "issue_number": issue_number,
+                    "title": row.get("title", ""),
+                    "body": row.get("body", ""),
+                    "state": row.get("state", ""),
+                    "created_at": row.get("created_at", ""),
+                    "comments_content": row.get("comments_content", ""),
+                    "ground_truth_symptom": row.get("symptom_id", ""),
+                    "ground_truth_root_cause": row.get("root_causes_id", ""),
+                })
+
+        if self.config.max_issues:
+            issues = issues[:self.config.max_issues]
+
+        print(f"[Stage III] Loaded {len(issues)} issues from CSV: {csv_path}")
+        return issues
+
     def run(self, issues: list) -> dict:
         if self.config.max_issues:
             issues = issues[:self.config.max_issues]
@@ -427,8 +523,8 @@ class Stage3Pipeline:
             decision = self._classify_with_debate(issue)
             decisions.append(decision)
 
-            print(f"           Symptom   : {decision.symptom}")
-            print(f"           Root cause: {decision.root_cause}")
+            print(f"           Symptom ID   : {decision.symptom_id}")
+            print(f"           Root cause ID: {decision.root_cause_id}")
             print(f"           Confidence: {decision.confidence:.2f} "
                   f"({decision.debate_rounds} round(s))")
 
@@ -459,8 +555,8 @@ class Stage3Pipeline:
             # Log this round
             transcript.append({
                 "round": round_num,
-                "symptom": current_label.get("symptom", ""),
-                "root_cause": current_label.get("root_cause", ""),
+                "symptom_id": current_label.get("symptom_id", ""),
+                "root_cause_id": current_label.get("root_cause_id", ""),
                 "classifier_reasoning": current_label.get("reasoning", ""),
                 "challenge": challenge,
                 "rebuttal": rebuttal.get("reasoning", ""),
@@ -489,12 +585,14 @@ class Stage3Pipeline:
         return TaxonomyDecision(
             issue_number=issue["issue_number"],
             repo=issue["repo"],
-            symptom=final_decision.get("symptom", "Unknown"),
-            root_cause=final_decision.get("root_cause", "5.1 Unknown"),
+            symptom_id=final_decision.get("symptom_id", "A"),
+            root_cause_id=final_decision.get("root_cause_id", "E"),
             reasoning=final_decision.get("reasoning", ""),
             confidence=float(final_decision.get("confidence", 0.0)),
             debate_rounds=rounds_completed,
             debate_transcript=transcript,
+            ground_truth_symptom=issue.get("ground_truth_symptom", ""),
+            ground_truth_root_cause=issue.get("ground_truth_root_cause", ""),
         )
 
     @staticmethod
@@ -513,12 +611,14 @@ class Stage3Pipeline:
                 {
                     "issue_number": d.issue_number,
                     "repo": d.repo,
-                    "symptom": d.symptom,
-                    "root_cause": d.root_cause,
+                    "symptom_id": d.symptom_id,
+                    "root_cause_id": d.root_cause_id,
                     "reasoning": d.reasoning,
                     "confidence": d.confidence,
                     "debate_rounds": d.debate_rounds,
                     "debate_transcript": d.debate_transcript,
+                    "ground_truth_symptom": d.ground_truth_symptom,
+                    "ground_truth_root_cause": d.ground_truth_root_cause,
                 }
                 for d in decisions
             ],
@@ -538,37 +638,46 @@ class Stage3Pipeline:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Load fault_related issues from Stage II output
-    stage2_path = "outputs/stage2_output.json"
+    import argparse
+    from tools.models import model_config_from_name
 
-    if os.path.exists(stage2_path):
-        with open(stage2_path) as f:
-            stage2 = json.load(f)
-        issues = stage2.get("fault_related", [])
-        print(f"[Stage III] Loaded {len(issues)} fault-related issues "
-              f"from Stage II output.")
-    else:
-        # Fallback sample for testing without Stage II
-        print("[Stage III] No Stage II output found — using sample issues.")
-        issues = [
-            {
-                "repo": "tensorflow/tfjs",
-                "issue_number": 1234,
-                "reasoning": (
-                    "Issue describes a crash when calling tf.matMul with "
-                    "mismatched tensor shapes on the WebGL backend."
-                ),
-            }
-        ]
+    parser = argparse.ArgumentParser(description="Stage III: Fault Taxonomy Classification")
+    parser.add_argument("--csv-path", default=None,
+                        help="Path to clean_CollectedIssues.csv for direct evaluation")
+    parser.add_argument("--model", default="llama3",
+                        help="Model name (e.g. gpt-4o, claude-3-7-sonnet, gemini-2.5-flash)")
+    parser.add_argument("--max-issues", type=int, default=None,
+                        help="Cap on number of issues to process (default: all)")
+    parser.add_argument("--max-rounds", type=int, default=3,
+                        help="Max debate rounds per issue (default: 3)")
+    parser.add_argument("--confidence-threshold", type=float, default=0.80,
+                        help="Resolver confidence threshold to stop debate (default: 0.80)")
+    args = parser.parse_args()
 
+    model_cfg = model_config_from_name(args.model)
     config = Stage3Config(
-        max_issues=None,             # set to an int to cap for testing
-        max_rounds=3,
-        confidence_threshold=0.80,
-        model=ModelConfig(
-            model_type="llama3",     # change to your pulled model
-        ),
+        max_issues=args.max_issues,
+        max_rounds=args.max_rounds,
+        confidence_threshold=args.confidence_threshold,
+        csv_path=args.csv_path,
+        model=model_cfg,
     )
 
     pipeline = Stage3Pipeline(config)
+
+    if args.csv_path:
+        issues = pipeline.load_issues_from_csv(args.csv_path)
+    else:
+        # Load fault_related issues from Stage II output
+        stage2_path = "outputs/stage2_output.json"
+        if os.path.exists(stage2_path):
+            with open(stage2_path) as f:
+                stage2 = json.load(f)
+            issues = stage2.get("fault_related", [])
+            print(f"[Stage III] Loaded {len(issues)} fault-related issues "
+                  f"from Stage II output.")
+        else:
+            print("[Stage III] No Stage II output found and no --csv-path given.")
+            sys.exit(1)
+
     pipeline.run(issues)

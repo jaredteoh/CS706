@@ -64,6 +64,7 @@ Bug Symptom Taxonomy (AutoEmpirical — Quan et al. 2022):
         A.2.3 Model Usage/Design Error: Failure in model usage or structure construction
   [A.3] Fetch Failure — crashes during web API requests for model files or data (e.g. same-origin policy)
   [A.4] Browser & Device Error — crashes showing browser or device problems (e.g. WebGL not supported)
+  [A.5] Others — other crash types with low frequency or unclear classification
 
 [B] Poor Performance — slows execution, consumes excessive resources, bad user experience
   [B.1] Time
@@ -271,8 +272,15 @@ class SymptomClassifierAgent:
 
     SYSTEM_PROMPT = (
         "You are an expert in analyzing JavaScript-based deep learning systems bugs.\n\n"
-        "Given a GitHub issue, classify ONLY the bug symptom ID from the taxonomy.\n\n"
-        "Rules:\n"
+        "Given a GitHub issue report from a repository related to TensorFlow.js, "
+        "third-party DL libraries, or JavaScript-based DL applications, classify ONLY "
+        "the bug symptom — what the fault looks like (observable behavior).\n\n"
+        "Classification guidelines:\n"
+        "1. Focus on observable behavior described in the issue for symptom classification.\n"
+        "2. Consider the JavaScript-based DL context (browsers, Node.js, TensorFlow.js).\n"
+        "3. Pay attention to keywords like error messages, environment details, and technical terms.\n"
+        "4. If multiple symptoms are present, choose the most prominent or primary one.\n\n"
+        "Taxonomy rules:\n"
         "- Use ONLY the provided taxonomy IDs — do not invent new ones.\n"
         "- Choose the most specific ID that fits the evidence.\n"
         "- Use top-level IDs (C, D, E) only when no subcategory clearly applies.\n\n"
@@ -340,8 +348,14 @@ class RootCauseClassifierAgent:
 
     SYSTEM_PROMPT = (
         "You are an expert in analyzing JavaScript-based deep learning systems bugs.\n\n"
-        "Given a GitHub issue and its confirmed symptom, classify ONLY the root cause ID.\n\n"
-        "Rules:\n"
+        "Given a GitHub issue report and its confirmed symptom, classify ONLY the root cause — "
+        "why the fault occurs (underlying technical reason).\n\n"
+        "Classification guidelines:\n"
+        "1. Look for underlying technical reasons mentioned or implied for root cause classification.\n"
+        "2. Consider the JavaScript-based DL context (browsers, Node.js, TensorFlow.js).\n"
+        "3. Pay attention to keywords like error messages, environment details, and technical terms.\n"
+        "4. If multiple causes are present, choose the most prominent or primary one.\n\n"
+        "Taxonomy rules:\n"
         "- Use ONLY the provided taxonomy IDs — do not invent new ones.\n"
         "- Always use a subcategory ID (e.g. A.4 not just A).\n"
         "- Use E only when the root cause truly cannot be determined.\n\n"

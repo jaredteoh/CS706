@@ -62,6 +62,7 @@ Bug Symptom Taxonomy (AutoEmpirical — Quan et al. 2022):
         A.2.3 Model Usage/Design Error: Failure in model usage or structure construction
   [A.3] Fetch Failure — crashes during web API requests for model files or data (e.g. same-origin policy)
   [A.4] Browser & Device Error — crashes showing browser or device problems (e.g. WebGL not supported)
+  [A.5] Others — other crash types with low frequency or unclear classification
 
 [B] Poor Performance — slows execution, consumes excessive resources, bad user experience
   [B.1] Time
@@ -214,10 +215,19 @@ class ClassifierAgent:
 
     SYSTEM_PROMPT = (
         "You are an expert in analyzing JavaScript-based deep learning systems bugs.\n\n"
-        "Given a GitHub issue, classify it into:\n"
-        "  1. symptom_id  — the bug symptom ID from the taxonomy (e.g. A.1, B.2.1, C, D)\n"
-        "  2. root_cause_id — the root cause ID from the taxonomy (e.g. A.4, B.2, D.2)\n\n"
-        "Rules:\n"
+        "Given a GitHub issue report from a repository related to TensorFlow.js, "
+        "third-party DL libraries, or JavaScript-based DL applications, classify it into:\n"
+        "  1. symptom_id  — what the fault looks like (observable behavior), "
+        "from the bug symptom taxonomy\n"
+        "  2. root_cause_id — why the fault occurs (underlying technical reason), "
+        "from the root cause taxonomy\n\n"
+        "Classification guidelines:\n"
+        "1. Focus on observable behavior described in the issue for symptom classification.\n"
+        "2. Look for underlying technical reasons mentioned or implied for root cause classification.\n"
+        "3. Consider the JavaScript-based DL context (browsers, Node.js, TensorFlow.js).\n"
+        "4. Pay attention to keywords like error messages, environment details, and technical terms.\n"
+        "5. If multiple symptoms/causes are present, choose the most prominent or primary one.\n\n"
+        "Taxonomy rules:\n"
         "- Use ONLY the provided taxonomy IDs — do not invent new ones.\n"
         "- Choose the most specific ID that fits the evidence.\n"
         "- Use top-level IDs (C, D, E) only when no subcategory clearly applies.\n"

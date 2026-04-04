@@ -132,6 +132,9 @@ class AutoEmpiricalMAS:
             Fault-related: {output['fault_related_count']}
             Non-fault: {output['non_fault_count']}
             Flagged: {output['flagged_for_review_count']}
+            Pre-filter hits: {output.get('pre_filter_count', 'N/A')}
+            Scorer overrides: {output.get('scorer_overrides', 'N/A')}
+            Second-pass flips: {output.get('second_pass_flips', 'N/A')}
 
             Is the filtering quality acceptable?
             Should we adjust confidence threshold or reprocess?
